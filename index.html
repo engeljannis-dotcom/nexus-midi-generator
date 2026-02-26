@@ -1772,27 +1772,25 @@ function midiNoteOff(note) {
   midiSend([0x80 | MIDI_CH, note, 0]);
 }
 
-// MIDI Clock — send 24 pulses per quarter note aligned to Nexus BPM
 function startMidiClock() {
-  if(!midiConnected || midiClockMode !== 'int') return;
+  if(!midiOut || !midiConnected || midiClockMode !== 'int') return;
   stopMidiClock();
-  // Send Start message
-  midiSend([0xFA]);
-  const bpm = song ? song.bpm : 120;
-  const intervalMs = (60000 / bpm) / PPQN;
-  midiClockTimer = setInterval(()=>{
-    midiSend([0xF8]); // Clock pulse
-  }, intervalMs);
+  try {
+    midiSend([0xFA]); // Start
+    const bpm = song ? song.bpm : 120;
+    const intervalMs = (60000 / bpm) / PPQN;
+    midiClockTimer = setInterval(()=>{
+      if(midiOut && midiConnected) midiSend([0xF8]);
+    }, intervalMs);
+  } catch(e) {}
 }
 
 function stopMidiClock() {
   if(midiClockTimer){ clearInterval(midiClockTimer); midiClockTimer=null; }
-  // Send Stop
-  if(midiConnected) midiSend([0xFC]);
+  if(midiOut && midiConnected){ try{ midiSend([0xFC]); }catch(e){} }
 }
 
 function updateMidiClockBpm() {
-  // Re-sync clock when BPM changes
   if(midiConnected && midiClockMode==='int' && playing) startMidiClock();
 }
 
@@ -1854,11 +1852,11 @@ function startScheduler() {
   nextSchedTime = ctx.currentTime + 0.05;
   schedStep = 0;
   seqTimer = setInterval(schedulerTick, SCHED_INT);
-  startMidiClock();
+  try { startMidiClock(); } catch(e){}
 }
 function stopScheduler() {
   clearInterval(seqTimer); seqTimer=null;
-  stopMidiClock();
+  try { stopMidiClock(); } catch(e){}
 }
 
 function stepDurSec() {
@@ -2314,59 +2312,62 @@ let isGenerating=false;
 async function generate() {
   if(isGenerating) return;
   isGenerating=true;
-  stop();
-
-  if(!ctx) initAudio();
-  if(ctx.state==='suspended') await ctx.resume();
 
   const btn=document.getElementById('gen-btn');
   const txt=document.getElementById('gen-txt');
-  btn.classList.add('busy'); txt.textContent='RENDERING…';
-  document.getElementById('gen-status').textContent='GENERATING';
-  document.getElementById('chip-live').textContent='GEN';
 
-  genCount++;
-  const seed=Date.now()^(genCount*0x9e3779b9);
+  try {
+    stop();
 
-  const loadProm=showLoading();
+    if(!ctx) initAudio();
+    if(ctx.state==='suspended') await ctx.resume();
 
-  // Song berechnen (sync — schnell)
-  song = buildSongStructure(seed);
+    btn.classList.add('busy'); txt.textContent='RENDERING…';
+    document.getElementById('gen-status').textContent='GENERATING';
+    document.getElementById('chip-live').textContent='GEN';
 
-  // Reverb + Delay konfigurieren
-  buildReverbIR(0.5);
-  revSend.gain.value = song.style.reverbWet;
-  delSend.gain.value = song.style.delayWet;
+    genCount++;
+    const seed=Date.now()^(genCount*0x9e3779b9);
 
-  // Sounds vorrendern
-  prerenderSounds(song);
+    const loadProm=showLoading();
 
-  await loadProm;
+    song = buildSongStructure(seed);
 
-  // UI aufbauen
-  buildSeqUI(song);
-  buildSongMap(song);
-  buildChordRow(song);
-  buildMixRow(song);
-  updateInfoPanel(song, genCount);
-  // Sync BPM slider to actual generated BPM
-  const sl = document.getElementById('bpm-slider');
-  if(sl){ sl.value = song.bpm; document.getElementById('bpm-display').textContent = song.bpm; bpmOverride = song.bpm; }
-  initVideo(song);
-  startViz();
+    buildReverbIR(0.5);
+    revSend.gain.value = song.style.reverbWet;
+    delSend.gain.value = song.style.delayWet;
 
-  // Transport starten
-  startScheduler();
-  playing=true;
-  updatePlayBtn(true);
+    prerenderSounds(song);
 
-  btn.classList.remove('busy');
-  txt.textContent='GENERATE';
-  isGenerating=false;
-  document.getElementById('gen-status').textContent='PLAYING';
-  document.getElementById('chip-live').textContent='LIVE';
+    await loadProm;
 
-  animProgress();
+    buildSeqUI(song);
+    buildSongMap(song);
+    buildChordRow(song);
+    buildMixRow(song);
+    updateInfoPanel(song, genCount);
+    const sl = document.getElementById('bpm-slider');
+    if(sl){ sl.value = song.bpm; document.getElementById('bpm-display').textContent = song.bpm; bpmOverride = song.bpm; }
+    initVideo(song);
+    startViz();
+
+    startScheduler();
+    playing=true;
+    updatePlayBtn(true);
+
+    document.getElementById('gen-status').textContent='PLAYING';
+    document.getElementById('chip-live').textContent='LIVE';
+
+    animProgress();
+
+  } catch(err) {
+    console.error('Generate error:', err);
+    document.getElementById('gen-status').textContent='ERROR';
+  } finally {
+    btn.classList.remove('busy');
+    txt.textContent='GENERATE';
+    isGenerating=false;
+  }
 }
 
 function animProgress() {
@@ -2403,11 +2404,11 @@ function playPause() {
 
 function stop() {
   playing=false;
-  stopScheduler();
+  try { stopScheduler(); } catch(e){}
   document.querySelectorAll('.s-step.cur').forEach(e=>e.classList.remove('cur'));
-  document.getElementById('progress-fill').style.width='0%';
-  document.getElementById('gen-status').textContent='STOPPED';
-  document.getElementById('chip-live').textContent='IDLE';
+  const pf=document.getElementById('progress-fill'); if(pf) pf.style.width='0%';
+  const gs=document.getElementById('gen-status'); if(gs) gs.textContent='STOPPED';
+  const cl=document.getElementById('chip-live'); if(cl) cl.textContent='IDLE';
   updatePlayBtn(false);
 }
 
