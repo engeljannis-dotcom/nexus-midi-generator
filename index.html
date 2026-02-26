@@ -602,8 +602,11 @@ const G = (() => {
   }
 
   // ─── DRUM SYNTHS ──────────────────────────────────────────────────────────
+  // Detect mobile to limit buffer sizes
+  const isMobile = /Mobi|Android/i.test(navigator.userAgent) || window.innerWidth < 768;
+
   function dspKick(tune=1, decay=0.5, punch=0.6, dist=0.2) {
-    const n = Math.floor(SR * 1.1);
+    const n = Math.floor(SR * (isMobile ? 0.7 : 1.1));
     const sub = pitchSweep(n, 120*tune, 28*tune);
     const sEnv = envExp(n, decay*500);
     for(let i=0;i<n;i++) sub[i] *= sEnv[i];
@@ -685,10 +688,12 @@ const G = (() => {
 
   function dspBass(midi, durSec) {
     const freq = mtof(midi);
-    const n = Math.floor(SR * Math.min(durSec * 1.1, 2.0));
+    const maxDur = isMobile ? 1.2 : 2.0;
+    const n = Math.floor(SR * Math.min(durSec * 1.1, maxDur));
     const saw = new Float32Array(n);
-    // 12 partials sawtooth
-    for(let h=1;h<=12;h++) {
+    // fewer partials on mobile
+    const partials = isMobile ? 6 : 12;
+    for(let h=1;h<=partials;h++) {
       const amp = 1/h;
       const hf = freq * h;
       for(let i=0;i<n;i++) saw[i] += amp * Math.sin(2*Math.PI*hf*i/SR);
@@ -718,7 +723,8 @@ const G = (() => {
   }
 
   function dspPad(midiNotes, durSec) {
-    const n = Math.floor(SR * Math.min(durSec + 0.3, 4.0));
+    const maxDur = isMobile ? 2.5 : 4.0;
+    const n = Math.floor(SR * Math.min(durSec + 0.3, maxDur));
     const out = new Float32Array(n);
     for(const midi of midiNotes) {
       const freq = mtof(midi);
@@ -932,39 +938,47 @@ const G = (() => {
     if(bar) bar.style.width = pct + '%';
   }
 
+  // Yield to browser between heavy tasks — longer on mobile
+  function yieldToUI(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function renderOne(label, pct, fn) {
+    loadingStep(label, pct);
+    await yieldToUI(40); // longer pause so browser can repaint & stay responsive
+    return fn();
+  }
+
   async function renderBuffers(s) {
-    loadingStep('INIT AUDIO ENGINE', 5);
-    await sleep(10);
-    loadingStep('RENDERING KICK', 15);
-    await sleep(10);
-    drumBuffers.kick = makeBuffer(dspKick(1, 0.5, 0.6, 0.2));
-    loadingStep('RENDERING SNARE', 25);
-    await sleep(10);
-    drumBuffers.snare = makeBuffer(dspSnare(1));
-    loadingStep('RENDERING HIHAT', 35);
-    await sleep(10);
-    drumBuffers.hihat = makeBuffer(dspHihat(false));
-    drumBuffers.openhat = makeBuffer(dspHihat(true));
-    loadingStep('RENDERING CLAP', 45);
-    await sleep(10);
-    drumBuffers.clap = makeBuffer(dspClap());
-    loadingStep('RENDERING PERC', 52);
-    await sleep(10);
-    drumBuffers.perc = makeBuffer(dspPerc(1));
-    loadingStep('RENDERING BASS', 62);
-    await sleep(10);
-    // pre-render bass for all unique chord notes
+    loadingStep('INIT AUDIO ENGINE', 3);
+    await yieldToUI(60);
+
+    drumBuffers.kick    = await renderOne('RENDERING KICK…',    10, () => makeBuffer(dspKick(1, 0.5, 0.6, 0.2)));
+    drumBuffers.snare   = await renderOne('RENDERING SNARE…',   22, () => makeBuffer(dspSnare(1)));
+    drumBuffers.hihat   = await renderOne('RENDERING HIHAT…',   33, () => makeBuffer(dspHihat(false)));
+    drumBuffers.openhat = await renderOne('RENDERING OPENHAT…', 40, () => makeBuffer(dspHihat(true)));
+    drumBuffers.clap    = await renderOne('RENDERING CLAP…',    48, () => makeBuffer(dspClap()));
+    drumBuffers.perc    = await renderOne('RENDERING PERC…',    54, () => makeBuffer(dspPerc(1)));
+
+    loadingStep('RENDERING BASS…', 62);
+    await yieldToUI(40);
+    // Only render one bass note per unique root (chord root only) — lighter on mobile
     const stepDur = 60 / s.bpm / 4;
-    for(const chord of s.chords) {
-      for(const midi of chord) {
-        const key = `bass_${midi}`;
-        if(!soundCache.has(key)) {
-          soundCache.set(key, makeBuffer(dspBass(midi - 24, stepDur * 2)));
-        }
+    const bassRoots = new Set();
+    for(const chord of s.chords) bassRoots.add(chord[0]);
+    // Also collect all pattern notes but limit total
+    const allBassNotes = new Set(bassRoots);
+    for(const bar of s.bassNotes) for(const n of bar) if(n !== null && n !== undefined) allBassNotes.add(n);
+    let bi = 0;
+    for(const midi of allBassNotes) {
+      const key = `bass_${midi}`;
+      if(!soundCache.has(key)) {
+        soundCache.set(key, makeBuffer(dspBass(midi - 24, stepDur * 2)));
       }
+      bi++;
+      if(bi % 3 === 0) await yieldToUI(20); // yield every 3 renders
     }
-    loadingStep('RENDERING PAD', 72);
-    await sleep(10);
+
+    loadingStep('RENDERING PAD…', 74);
+    await yieldToUI(40);
     for(let ci=0;ci<s.chords.length;ci++) {
       const key = `pad_${ci}`;
       const beatDur = 60 / s.bpm;
@@ -972,23 +986,28 @@ const G = (() => {
       if(!soundCache.has(key)) {
         soundCache.set(key, makeBuffer(dspPad(padNotes, beatDur * 4)));
       }
+      await yieldToUI(30);
     }
-    loadingStep('RENDERING MELODY', 82);
-    await sleep(10);
-    // pre-render melody notes
+
+    loadingStep('RENDERING MELODY…', 84);
+    await yieldToUI(40);
     const allMelNotes = new Set();
     for(const bar of s.melNotes) for(const n of bar) if(n !== null) allMelNotes.add(n);
+    let mi = 0;
     for(const midi of allMelNotes) {
       const key = `mel_${midi}`;
       if(!soundCache.has(key)) {
-        soundCache.set(key, makeBuffer(dspMelody(midi, stepDur * 4)));
+        soundCache.set(key, makeBuffer(dspMelody(midi, stepDur * 3)));
       }
+      mi++;
+      if(mi % 2 === 0) await yieldToUI(20);
     }
-    loadingStep('BUILDING SEQUENCER', 92);
-    await sleep(10);
+
+    loadingStep('BUILDING SEQUENCER…', 94);
+    await yieldToUI(40);
   }
 
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function sleep(ms) { return yieldToUI(ms); }
 
   // ─── SEQUENCER / SCHEDULER ────────────────────────────────────────────────
   function getStepInfo(stepIdx) {
@@ -1553,16 +1572,25 @@ const G = (() => {
     try {
       stop();
       soundCache.clear();
-      if(!ctx) initAudio();
-      if(ctx.state === 'suspended') await ctx.resume();
+      // AudioContext MUST be created/resumed inside user gesture (touchstart/click)
+      if(!ctx) {
+        try { initAudio(); } catch(e) { console.error('AudioContext init failed:', e); throw e; }
+      }
+      // Give browser time to process the AudioContext creation before resuming
+      await yieldToUI(80);
+      if(ctx.state === 'suspended') {
+        try { await ctx.resume(); } catch(e) { console.warn('ctx.resume failed:', e); }
+      }
+      await yieldToUI(40);
       if(btn) btn.classList.add('busy');
       if(txt) txt.textContent = 'RENDERING…';
       genCount++;
       const seed = Date.now() ^ (genCount * 0x9e3779b9);
       song = buildSong(seed);
+      await yieldToUI(40);
       await renderBuffers(song);
-      loadingStep('BUILDING UI', 96);
-      await sleep(10);
+      loadingStep('BUILDING UI…', 97);
+      await yieldToUI(40);
       buildSeqUI(song);
       buildRightColUI(song);
       // Sync BPM slider
@@ -1571,12 +1599,15 @@ const G = (() => {
       if(slider) slider.value = song.bpm;
       if(display) display.textContent = song.bpm;
       bpmOverride = song.bpm;
-      loadingStep('READY', 100);
-      await sleep(80);
+      loadingStep('READY ✓', 100);
+      await yieldToUI(120);
       showLoading(false);
       startPlayback();
     } catch(err) {
-      console.error(err);
+      console.error('Generate error:', err);
+      // Always hide loading on error
+      loadingStep('ERROR — TAP AGAIN', 0);
+      await yieldToUI(1200);
       showLoading(false);
     } finally {
       if(btn) btn.classList.remove('busy');
